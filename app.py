@@ -67,6 +67,12 @@ centrality_metric = st.sidebar.selectbox(
     ["Betweenness (Quyền lực cầu nối)", "Degree (Số lượng liên kết)", "Closeness (Độ nhạy thông tin)"]
 )
 
+# Thêm chế độ hiển thị Layout
+layout_mode = st.sidebar.radio(
+    "Chế độ hiển thị (Layout):", 
+    ["Động (Vật lý, chống đè nốt)", "Tĩnh (Toán học Kamada-Kawai, chuẩn khoảng cách)"]
+)
+
 run_btn = st.sidebar.button("🚀 Chạy Phân Tích Đồ Thị", type="primary")
 
 if start_dt >= end_dt:
@@ -76,7 +82,6 @@ if start_dt >= end_dt:
 # 4. CÁC HÀM CỐT LÕI (ĐÃ TỐI ƯU HÓA CACHE)
 # ==========================================
 
-# 4.1. Caching Ma trận để không phải tính lại Pearson mỗi lần bấm nút
 @st.cache_data
 def get_matrices(start_date, end_date):
     start_date = pd.to_datetime(start_date)
@@ -89,10 +94,8 @@ def get_matrices(start_date, end_date):
     dist_matrix = np.sqrt(2 * (1 - corr_matrix).clip(lower=0))
     return corr_matrix, dist_matrix, len(window_data)
 
-# 4.2. Caching PMFG (Vì thuật toán check Planarity rất nặng)
 @st.cache_resource
 def compute_algorithms(corr_matrix, dist_matrix, g_type):
-    # Khởi tạo đồ thị đầy đủ
     G_full = nx.Graph()
     cols = corr_matrix.columns
     G_full.add_nodes_from(cols)
@@ -101,12 +104,10 @@ def compute_algorithms(corr_matrix, dist_matrix, g_type):
         for j in range(i + 1, len(cols)):
             G_full.add_edge(cols[i], cols[j], weight=dist_matrix.iloc[i, j])
 
-    # Chạy thuật toán tương ứng
     if "MST" in g_type:
         target_graph = nx.minimum_spanning_tree(G_full, weight='weight')
         node_to_cluster = None
     else:
-        # Xây dựng PMFG
         sorted_edges = sorted(G_full.edges(data=True), key=lambda x: x[2]['weight'])
         N = G_full.number_of_nodes()
         target_graph = nx.Graph()
@@ -119,13 +120,11 @@ def compute_algorithms(corr_matrix, dist_matrix, g_type):
             if not nx.check_planarity(target_graph)[0]:
                 target_graph.remove_edge(u, v)
         
-        # Chạy DBHT Clustering
         communities = greedy_modularity_communities(target_graph, weight='weight')
         node_to_cluster = {node: cid + 1 for cid, comm in enumerate(communities) for node in comm}
         
     return target_graph, node_to_cluster
 
-# 4.3. Tính toán Node Size (Rất nhẹ, không cần cache)
 def calculate_centrality(graph, metric_name):
     if "Betweenness" in metric_name:
         return nx.betweenness_centrality(graph, weight='weight')
@@ -134,13 +133,11 @@ def calculate_centrality(graph, metric_name):
     else:
         return nx.closeness_centrality(graph, distance='weight')
 
-# 4.4. Cấu hình Pyvis (ĐÃ SỬA LỖI TRẮNG MÀN HÌNH)
 def setup_pyvis_network():
-    # Thêm cdn_resources='remote' là CHÌA KHÓA để select_menu hoạt động trên Streamlit
     net = Network(height='700px', width='100%', bgcolor='#ffffff', font_color='black', 
                   select_menu=True, cdn_resources='remote')
     net.force_atlas_2based(
-        gravity=-50, central_gravity=0.01, spring_length=150, spring_strength=0.08, damping=0.4, overlap=0
+        gravity=-30, central_gravity=0.01, spring_length=150, spring_strength=0.03, damping=0.4, overlap=0
     )
     return net
 
@@ -158,42 +155,83 @@ if run_btn and start_dt < end_dt:
     metric_short_name = centrality_metric.split(" ")[0]
 
     with st.spinner('Đang xử lý mạng lưới...'):
-        # Lấy đồ thị từ bộ nhớ đệm (Nhanh gấp 10 lần)
         target_graph, node_to_cluster = compute_algorithms(corr_matrix, dist_matrix, graph_type)
-        
-        # Tính toán Centrality động
         cent_dict = calculate_centrality(target_graph, centrality_metric)
         max_cent = max(cent_dict.values()) if cent_dict else 1
         
-        # Vẽ đồ thị
+        # --- BẢNG CHÚ THÍCH (LEGEND) TRỰC QUAN ---
+        st.markdown("---")
+        st.markdown("### 📖 Chú thích Biểu đồ")
+        col_leg1, col_leg2, col_leg3 = st.columns(3)
+        with col_leg1:
+            st.markdown(f"**🟢 Kích thước Đỉnh (Node):**\nThể hiện điểm số **{metric_short_name}**. Nút càng to, mã đó càng có vị trí cốt lõi trong mạng lưới thị trường.")
+        with col_leg2:
+            if "MST" in graph_type:
+                st.markdown("**🎨 Màu sắc (MST):**\nTrải dài từ **Vàng Cam** (điểm thấp) đến **Đỏ Sậm** (điểm cao nhất). Giúp dễ dàng nhận diện các mã dẫn dắt.")
+            else:
+                st.markdown("**🎨 Màu sắc (PMFG):**\nMỗi màu sắc rực rỡ đại diện cho một **Cụm ngành (Cluster)** độc lập do thuật toán tự động nhận diện.")
+        with col_leg3:
+            st.markdown("**🔗 Liên kết (Edge):**\nKhoảng cách trên hình tỷ lệ thuận với khoảng cách toán học. **Hai nốt càng gần và cạnh nối càng dày, sự tương quan (đồng pha) giữa chúng càng mạnh.**")
+        st.markdown("*(💡 Mẹo: Dùng con lăn chuột để Zoom. Nhấn giữ và kéo nốt để xem sự co giãn của thị trường. Nhập tên mã vào ô 'Select Node' trên đồ thị để highlight.)*")
+        st.markdown("---")
+
+        # Khởi tạo đồ thị
         net = setup_pyvis_network()
-        cmap = cm.get_cmap('Set3', 12) 
         
+        # Khởi tạo dải màu
+        cmap_pmfg = cm.get_cmap('tab20', 20) 
+        cmap_mst = cm.get_cmap('YlOrRd')     
+        
+        # KIỂM TRA CHẾ ĐỘ HIỂN THỊ (LAYOUT)
+        if layout_mode == "Tĩnh (Toán học Kamada-Kawai, chuẩn khoảng cách)":
+            pos = nx.kamada_kawai_layout(target_graph, weight='weight')
+            scale_factor = 800 
+            net.toggle_physics(False) # Tắt vật lý để cố định tọa độ
+        else:
+            pos = None
+            net.toggle_physics(True) # Bật vật lý để các nốt đẩy nhau
+
+        # VÒNG LẶP VẼ NODE (Chỉ 1 vòng lặp duy nhất)
         for node in target_graph.nodes():
-            # MST kích thước nốt to hơn PMFG một chút
-            base_size = 30 if "MST" in graph_type else 20
+            base_size = 35 if "MST" in graph_type else 20
             base_min = 15 if "MST" in graph_type else 10
-            
             size = (cent_dict[node] / max_cent) * base_size + base_min if max_cent > 0 else base_min
             
-            if node_to_cluster: # Dành cho PMFG
+            if node_to_cluster: 
                 cluster_id = node_to_cluster.get(node, 0)
-                hex_color = mcolors.rgb2hex(cmap(cluster_id % 12))
+                hex_color = mcolors.rgb2hex(cmap_pmfg(cluster_id % 20))
                 hover_text = f"Mã: {node}\nCụm ngành: {cluster_id}\n{metric_short_name}: {cent_dict[node]:.4f}"
-            else: # Dành cho MST
-                intensity = int(255 - (cent_dict[node] / max_cent) * 150) if max_cent > 0 else 255
-                hex_color = f"#ff{intensity:02x}{intensity:02x}"
+            else: 
+                color_intensity = 0.3 + 0.7 * (cent_dict[node] / max_cent) if max_cent > 0 else 0.3
+                hex_color = mcolors.rgb2hex(cmap_mst(color_intensity))
                 hover_text = f"Mã: {node}\n{metric_short_name}: {cent_dict[node]:.4f}"
                 
-            net.add_node(node, label=str(node), size=size, title=hover_text, color=hex_color)
+            # Gán tọa độ nếu ở chế độ Tĩnh
+            if pos is not None:
+                net.add_node(
+                    node, label=str(node), size=size, title=hover_text, color=hex_color,
+                    x=float(pos[node][0] * scale_factor), 
+                    y=float(pos[node][1] * scale_factor),
+                    physics=False
+                )
+            else:
+                net.add_node(node, label=str(node), size=size, title=hover_text, color=hex_color)
         
+        # VÒNG LẶP VẼ EDGE (Chỉ 1 vòng lặp duy nhất)
         for source, target, data in target_graph.edges(data=True):
             weight = data['weight']
-            # Cạnh MST dày hơn PMFG
             edge_width = max(0.5, 3 - weight) if "MST" in graph_type else max(0.3, 2 - weight)
-            net.add_edge(source, target, value=edge_width, title=f"Distance: {weight:.3f}", color="#cccccc")
+            physical_length = float(weight * 200) 
+            
+            net.add_edge(
+                source, target, 
+                value=edge_width, 
+                length=physical_length, 
+                title=f"Distance: {weight:.3f}", 
+                color="#aaaaaa"
+            )
         
-        # Lưu và hiển thị
+        # LƯU VÀ HIỂN THỊ HTML
         html_file = "interactive_graph.html"
         net.save_graph(html_file)
         with open(html_file, 'r', encoding='utf-8') as f:
